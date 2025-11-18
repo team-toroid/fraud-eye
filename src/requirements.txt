@@ -1,0 +1,11 @@
+kagglehub
+datasets
+transformers
+torch
+tensorflow
+scikit-learn
+matplotlib
+seaborn
+pandas
+numpy
+structlog
