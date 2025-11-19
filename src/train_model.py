@@ -3,25 +3,58 @@ Train DistilBERT on merged dataset and export TFLite + vocab.
 """
 
 import os
+from typing import Dict, Tuple
 
 import pandas as pd
 import structlog
-import tensorflow as tf
-import tqdm
-from transformers import (AutoModelForSequenceClassification, AutoTokenizer, TFAutoModelForSequenceClassification,
-                          Trainer, TrainingArguments)
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+from sklearn.model_selection import train_test_split
+from transformers import (
+    AutoModelForSequenceClassification,
+    AutoTokenizer,
+    EarlyStoppingCallback,
+    Trainer,
+    TrainingArguments,
+)
 
 from datasets import Dataset
-from src.config import (BATCH_SIZE, CHECKPOINTS_DIR, EPOCHS, FINAL_MODEL_DIR, FP16, LEARNING_RATE, LOGS_DIR, MAX_LENGTH,
-                        MODEL_NAME, TF_MODEL_DIR, TFLITE_MODEL, TRAIN_CSV, VAL_CSV, VOCAB_TXT, WEIGHT_DECAY)
+from src.config import (
+    BATCH_SIZE,
+    CHECKPOINTS_DIR,
+    EARLY_STOPPING_PATIENCE,
+    EPOCHS,
+    FINAL_MODEL_DIR,
+    FP16,
+    GRADIENT_ACCUMULATION_STEPS,
+    LEARNING_RATE,
+    LOGS_DIR,
+    MAX_LENGTH,
+    MERGED_CSV,
+    MODEL_NAME,
+    SYNTHETIC_CSV,
+    WARMUP_RATIO,
+    WEIGHT_DECAY,
+)
 
 logger = structlog.get_logger(__name__)
 
 
-def load_and_tokenize(csv_path: str):
+def compute_metrics(pred) -> Dict[str, float]:
+    """Compute accuracy, precision, recall, and F1 score."""
+    labels = pred.label_ids
+    preds = pred.predictions.argmax(-1)
+    precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average="binary")
+    acc = accuracy_score(labels, preds)
+    return {"accuracy": acc, "f1": f1, "precision": precision, "recall": recall}
+
+
+def load_and_tokenize(csv_path: str, tokenizer=None) -> Tuple[Dataset, AutoTokenizer]:
     """Load CSV and tokenize → return (dataset, tokenizer)."""
     df = pd.read_csv(csv_path)
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+
+    # Create tokenizer if not provided
+    if tokenizer is None:
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
     def tokenize(batch):
         return tokenizer(
@@ -39,8 +72,65 @@ def load_and_tokenize(csv_path: str):
 def train_model() -> None:
     """Train DistilBERT → export PyTorch + TFLite + vocab."""
     logger.info("Loading datasets")
-    train_ds, tokenizer = load_and_tokenize(TRAIN_CSV)
-    val_ds, _ = load_and_tokenize(VAL_CSV)
+
+    # Load merged dataset
+    merged_df = pd.read_csv(MERGED_CSV)
+
+    # Load synthetic dataset and split: 20% for train/test, 80% for validation
+    synthetic_df = pd.read_csv(SYNTHETIC_CSV)
+
+    # Split synthetic: 20% for training, 80% for validation
+    synthetic_train_portion, synthetic_val = train_test_split(
+        synthetic_df, test_size=0.99, stratify=synthetic_df["label"], random_state=27  # 80% for validation
+    )
+
+    # Merge the 20% synthetic with fraudeye_merged
+    combined_df = pd.concat([merged_df, synthetic_train_portion], ignore_index=True)
+
+    # Split the combined dataset 80:20 for train:test
+    train_df, test_df = train_test_split(
+        combined_df, test_size=0.2, stratify=combined_df["label"], random_state=16  # 80% train, 20% test
+    )
+
+    # Use remaining 80% of synthetic for validation
+    val_df = synthetic_val
+
+    logger.info(
+        "Dataset split completed",
+        total_merged=len(merged_df),
+        synthetic_train_portion=len(synthetic_train_portion),
+        synthetic_val=len(synthetic_val),
+        combined_before_split=len(combined_df),
+        final_train=len(train_df),
+        final_test=len(test_df),
+        final_val=len(val_df),
+        train_scam_ratio=f"{train_df['label'].sum() / len(train_df):.2%}",
+        test_scam_ratio=f"{test_df['label'].sum() / len(test_df):.2%}",
+        val_scam_ratio=f"{val_df['label'].sum() / len(val_df):.2%}",
+    )
+
+    # Initialize tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+
+    # Tokenize all datasets
+    def tokenize_df(df):
+        ds = Dataset.from_pandas(df).map(
+            lambda batch: tokenizer(
+                batch["text"],
+                truncation=True,
+                padding="max_length",
+                max_length=MAX_LENGTH,
+            ),
+            batched=True,
+        )
+        ds.set_format("torch", columns=["input_ids", "attention_mask", "label"])
+        return ds
+
+    train_ds = tokenize_df(train_df)
+    test_ds = tokenize_df(test_df)
+    val_ds = tokenize_df(val_df)
+
+    logger.info("Datasets tokenized successfully")
 
     # Load model
     model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
@@ -56,10 +146,15 @@ def train_model() -> None:
         num_train_epochs=EPOCHS,
         weight_decay=WEIGHT_DECAY,
         load_best_model_at_end=True,
-        metric_for_best_model="eval_loss",
+        metric_for_best_model="f1",  # Changed to F1 for better model selection
+        greater_is_better=True,  # Higher F1 is better
         fp16=FP16,
         logging_dir=str(LOGS_DIR),
+        logging_steps=50,
         report_to=[],
+        warmup_ratio=WARMUP_RATIO,
+        gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
+        save_total_limit=3,  # Keep only best 3 checkpoints
     )
 
     trainer = Trainer(
@@ -68,10 +163,17 @@ def train_model() -> None:
         train_dataset=train_ds,
         eval_dataset=val_ds,
         tokenizer=tokenizer,
+        compute_metrics=compute_metrics,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=EARLY_STOPPING_PATIENCE)],
     )
 
-    logger.info("Starting training")
+    logger.info("Starting training with optimized configuration")
     trainer.train()
+
+    # Evaluate on test set
+    logger.info("Evaluating on test set")
+    test_results = trainer.evaluate(test_ds)
+    logger.info("Test set results", **test_results)
 
     # Save final PyTorch model + tokenizer
     final_dir = str(FINAL_MODEL_DIR)
@@ -79,89 +181,6 @@ def train_model() -> None:
     trainer.save_model(final_dir)
     tokenizer.save_pretrained(final_dir)
     logger.info("PyTorch model + tokenizer saved", path=final_dir)
-
-    # Convert to TensorFlow SavedModel
-    logger.info("Converting to TensorFlow SavedModel")
-    tf_model = TFAutoModelForSequenceClassification.from_pretrained(final_dir, from_pt=True)
-
-    # Create a concrete function for inference
-    @tf.function(
-        input_signature=[
-            tf.TensorSpec(shape=[None, MAX_LENGTH], dtype=tf.int32, name="input_ids"),
-            tf.TensorSpec(shape=[None, MAX_LENGTH], dtype=tf.int32, name="attention_mask"),
-        ]
-    )
-    def serve(input_ids, attention_mask):
-        return tf_model(input_ids=input_ids, attention_mask=attention_mask, training=False)
-
-    # Export SavedModel (without debug info → faster TFLite conversion)
-    tf_saved_dir = str(TF_MODEL_DIR)
-    os.makedirs(tf_saved_dir, exist_ok=True)
-
-    # ← FIXED: Use save_debug_info (TF 2.16+); fallback for older TF
-    save_options = None
-    if hasattr(tf.saved_model.SaveOptions, "save_debug_info"):
-        save_options = tf.saved_model.SaveOptions(save_debug_info=False)
-    tf.saved_model.save(tf_model, tf_saved_dir, signatures={"serving_default": serve}, options=save_options)
-    logger.info("TensorFlow SavedModel exported", path=tf_saved_dir)
-
-    # Convert to TFLite with clean, real progress
-    logger.info("Converting to TFLite")
-
-    # Suppress TF warnings and logs
-    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # 2 = filter WARNING and below
-    tf.get_logger().setLevel("ERROR")
-
-    converter = tf.lite.TFLiteConverter.from_saved_model(tf_saved_dir)
-    converter.optimizations = [tf.lite.Optimize.DEFAULT]
-    converter.target_spec.supported_types = [tf.float16]
-    converter.experimental_new_converter = True  # Faster MLIR path
-
-    # Phase-based progress (weights tuned for DistilBERT)
-    phases = [
-        ("Loading SavedModel", 20),
-        ("Optimizing graph", 40),
-        ("Quantizing & converting", 30),
-        ("Finalizing TFLite", 10),
-    ]
-    total_weight = sum(w for _, w in phases)
-    pbar = tqdm.tqdm(
-        total=total_weight,
-        desc="TFLite conversion",
-        unit="%",
-        bar_format="{l_bar}{bar}| {elapsed} | {postfix}",
-        colour="cyan",
-    )
-
-    # Start: Loading phase
-    pbar.set_postfix(phase="Loading SavedModel")
-    pbar.update(phases[0][1] * 0.3)  # Partial progress on start
-
-    try:
-        tflite_model = converter.convert()
-
-        # Complete remaining phases
-        for phase_name, weight in phases[1:]:
-            pbar.set_postfix(phase=phase_name)
-            pbar.update(weight)
-
-    except Exception as e:
-        pbar.close()
-        logger.error("TFLite conversion failed", error=str(e))
-        raise
-    finally:
-        pbar.close()
-
-    # Save TFLite model
-    with open(TFLITE_MODEL, "wb") as f:
-        f.write(tflite_model)
-    logger.info("TFLite model exported", path=TFLITE_MODEL)
-
-    # Save vocab
-    with open(VOCAB_TXT, "w") as f:
-        for token in tokenizer.get_vocab().keys():
-            f.write(token + "\n")
-    logger.info("Vocab saved", path=VOCAB_TXT)
 
 
 if __name__ == "__main__":

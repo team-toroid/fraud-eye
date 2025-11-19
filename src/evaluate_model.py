@@ -11,11 +11,20 @@ import seaborn as sns
 import structlog
 import torch
 from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, roc_curve
+from sklearn.model_selection import train_test_split
 from transformers import AutoTokenizer, pipeline
 
 from datasets import Dataset
-from src.config import (CONFUSION_PLOT, FINAL_MODEL_DIR, MAX_LENGTH, METRICS_TXT, MODEL_NAME, RESULTS_DIR, ROC_PLOT,
-                        TEST_CSV)
+from src.config import (
+    CONFUSION_PLOT,
+    FINAL_MODEL_DIR,
+    MAX_LENGTH,
+    MERGED_CSV,
+    METRICS_TXT,
+    MODEL_NAME,
+    ROC_PLOT,
+    SYNTHETIC_CSV,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -34,8 +43,44 @@ def load_and_tokenize(csv_path: str) -> Dataset:
 
 def evaluate() -> None:
     """Run evaluation and save results."""
-    logger.info("Loading test set")
-    test_df = pd.read_csv(TEST_CSV)
+    logger.info("Loading datasets")
+
+    # Load merged dataset
+    merged_df = pd.read_csv(MERGED_CSV)
+
+    # Load synthetic dataset and split: 20% for train/test, 80% for validation
+    synthetic_df = pd.read_csv(SYNTHETIC_CSV)
+
+    # Split synthetic: 20% for training, 80% for validation
+    synthetic_train_portion, synthetic_val = train_test_split(
+        synthetic_df, test_size=0.99, stratify=synthetic_df["label"], random_state=27  # 80% for validation
+    )
+
+    # Merge the 20% synthetic with fraudeye_merged
+    combined_df = pd.concat([merged_df, synthetic_train_portion], ignore_index=True)
+
+    # Split the combined dataset 80:20 for train:test
+    train_df, test_df = train_test_split(
+        combined_df, test_size=0.2, stratify=combined_df["label"], random_state=16  # 80% train, 20% test
+    )
+
+    # Use remaining 80% of synthetic for validation
+    val_df = synthetic_val
+
+    logger.info(
+        "Dataset split completed",
+        total_merged=len(merged_df),
+        synthetic_train_portion=len(synthetic_train_portion),
+        synthetic_val=len(synthetic_val),
+        combined_before_split=len(combined_df),
+        final_train=len(train_df),
+        final_test=len(test_df),
+        final_val=len(val_df),
+        train_scam_ratio=f"{train_df['label'].sum() / len(train_df):.2%}",
+        test_scam_ratio=f"{test_df['label'].sum() / len(test_df):.2%}",
+        val_scam_ratio=f"{val_df['label'].sum() / len(val_df):.2%}",
+    )
+
     if test_df.empty:
         raise RuntimeError("Test set is empty; nothing to evaluate.")
 
@@ -44,6 +89,7 @@ def evaluate() -> None:
     test_df["label"] = test_df["label"].astype(int)
 
     device = 0 if torch.cuda.is_available() else -1
+
     def _build_classifier(model_id: str):
         tokenizer = AutoTokenizer.from_pretrained(model_id)
         return pipeline(

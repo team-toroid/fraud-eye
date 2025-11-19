@@ -214,3 +214,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Models
+models/conversion/*
+models/training/*
+!models/training/fraudeye-distilbert/
+data
+
+# Mac Stuff
+.DS_Store
