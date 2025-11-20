@@ -1,0 +1,20 @@
+FRAUDEYE EVALUATION (EDGE CASES)
+==================================================
+Accuracy:  0.9010
+Precision: 0.8487
+Recall:    0.9760
+F1 Score:  0.9079
+ROC-AUC:   0.9880
+--------------------------------------------------
+              precision    recall  f1-score   support
+
+       Legit       0.97      0.83      0.89       500
+        Scam       0.85      0.98      0.91       500
+
+    accuracy                           0.90      1000
+   macro avg       0.91      0.90      0.90      1000
+weighted avg       0.91      0.90      0.90      1000
+
+Confusion Matrix:
+[[413  87]
+ [ 12 488]]

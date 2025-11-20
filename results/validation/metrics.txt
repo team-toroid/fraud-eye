@@ -1,0 +1,20 @@
+FRAUDEYE EVALUATION (VALIDATION SET)
+==================================================
+Accuracy:  0.9303
+Precision: 0.9216
+Recall:    0.9841
+F1 Score:  0.9518
+ROC-AUC:   0.9897
+--------------------------------------------------
+              precision    recall  f1-score   support
+
+       Legit       0.96      0.80      0.87      1485
+        Scam       0.92      0.98      0.95      3465
+
+    accuracy                           0.93      4950
+   macro avg       0.94      0.89      0.91      4950
+weighted avg       0.93      0.93      0.93      4950
+
+Confusion Matrix:
+[[1195  290]
+ [  55 3410]]

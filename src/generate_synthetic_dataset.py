@@ -1175,6 +1175,10 @@ def analyze_dataset(df: pd.DataFrame) -> None:
 # MAIN EXECUTION
 # ============================================================================
 
+from src.config import DATASETS_DIR
+
+# ... (existing imports)
+
 if __name__ == "__main__":
     logger.info(
         "Enhanced Synthetic Fraud Detection Dataset Generator",
@@ -1188,9 +1192,31 @@ if __name__ == "__main__":
         ],
     )
 
-    output_path = "../datasets/fraudeye_synthetic.csv"
+    output_path = DATASETS_DIR / "fraudeye_synthetic.csv"
     df = generate_synthetic_dataset(num_samples=5000, fraud_ratio=0.7, output_path=output_path)
 
     analyze_dataset(df)
+
+    # Generate dedicated edge case dataset for evaluation
+    logger.info("Generating dedicated edge case dataset for evaluation")
+    edge_case_data = []
+    
+    # Generate 500 Scam Edge Cases
+    for _ in range(500):
+        text, label = generate_edge_case()
+        edge_case_data.append({"text": text, "label": label})
+        
+    # Generate 500 Legit Cases (to serve as negative examples)
+    for _ in range(500):
+        text, label = generate_legit_call()
+        edge_case_data.append({"text": text, "label": label})
+    
+    # Shuffle the dataset
+    random.shuffle(edge_case_data)
+    
+    edge_df = pd.DataFrame(edge_case_data)
+    edge_output_path = DATASETS_DIR / "fraudeye_edge_case.csv"
+    edge_df.to_csv(edge_output_path, index=False, quoting=csv.QUOTE_ALL)
+    logger.info("Edge case dataset saved", path=str(edge_output_path), count=len(edge_df))
 
     logger.info("Generation complete")

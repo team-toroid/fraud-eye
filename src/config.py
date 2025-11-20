@@ -45,6 +45,7 @@ SYNTHETIC_CSV = DATASETS_DIR / "fraudeye_synthetic.csv"
 TRAIN_CSV = DATASETS_DIR / "fraudeye_train.csv"
 VAL_CSV = DATASETS_DIR / "fraudeye_val.csv"
 TEST_CSV = DATASETS_DIR / "fraudeye_test.csv"
+EDGE_CASE_CSV = DATASETS_DIR / "fraudeye_edge_case.csv"
 
 # === Model Outputs ===
 FINAL_MODEL_DIR = TRAINING_DIR / "fraudeye-distilbert"
